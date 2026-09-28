@@ -1,0 +1,1 @@
+- [allow-profanity](allow-profanity.md) — The user explicitly allows the AI to cuss freely

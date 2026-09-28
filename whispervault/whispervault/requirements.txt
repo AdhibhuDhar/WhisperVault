@@ -1,0 +1,13 @@
+# Core (runs the detectors, review, vault and export - everything except ASR/NER models)
+numpy>=1.26
+scipy>=1.11
+soundfile>=0.12
+cryptography>=42
+python-docx>=1.1
+tokenizers>=0.19        # only needed for --ner onnx
+
+# NPU runtime: install ON A SNAPDRAGON X PC (wheels exist for win_arm64 and win_amd64, CPython 3.11)
+# onnxruntime-qnn
+
+# ASR (Qualcomm AI Hub Whisper): see docs/SETUP_SNAPDRAGON.md
+# qai-hub-models

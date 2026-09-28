@@ -1,0 +1,10 @@
+.claude/
+__pycache__/
+venv/
+*.pyc
+~$*
+WhisperVault_Final_Submission.zip
+*.pt
+*.onnx.data
+*_Submission.zip
+*.pdf

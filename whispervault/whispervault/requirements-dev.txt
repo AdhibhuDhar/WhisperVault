@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8
+spacy>=3.7          # optional CPU stand-in NER for demos: python -m spacy download en_core_web_sm
+onnxruntime>=1.15.0

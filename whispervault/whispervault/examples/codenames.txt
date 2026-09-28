@@ -1,0 +1,3 @@
+# One literal keyword per line. Entries are NEVER treated as regex.
+Project SILVERHAWK
+Acme Robotics

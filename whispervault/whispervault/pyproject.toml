@@ -1,0 +1,22 @@
+[project]
+name = "whispervault"
+version = "0.1.0"
+description = "Air-gapped speech-to-text and PII pseudonymization for Snapdragon X PCs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Adhibhu Dhar" }]
+dependencies = ["numpy", "scipy", "soundfile", "cryptography", "python-docx"]
+
+[project.optional-dependencies]
+onnx = ["tokenizers", "onnxruntime"]
+dev = ["pytest", "spacy"]
+
+[project.scripts]
+whispervault = "whispervault.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["whispervault*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

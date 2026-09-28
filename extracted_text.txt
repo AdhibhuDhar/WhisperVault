@@ -1,0 +1,244 @@
+SNAPDRAGON® AI LAB — BUILD & PRESENT CHALLENGE
+ADHIBHU DHAR
+Kalinga Institute of Industrial Technology (KIIT)
+WhisperVault
+Air-Gapped PII Redaction Engine
+On-device speech-to-text + hybrid entity redaction, purely on the Hexagon NPU
+Sector: Offline Developer / Enterprise Productivity & Security
+Target Hardware: Snapdragon X Elite / X Plus — HP OmniBook X
+Models: Whisper-Base-EN (Qualcomm AI Hub) · DistilBERT-NER (open-source, AI Hub-compiled)
+Judging Criteria Addressed: Technical Implementation · Application Use Case & Innovation · Deployment & Accessibility · Presentation & Documentation
+1. Executive Summary
+Legal, medical, and enterprise professionals record interviews, depositions, and meetings full of protected information — names, medical record numbers, financial data, internal project codenames. Cloud transcription is a non-starter: HIPAA, attorney–client privilege, and internal data policy rule it out. Local transcription fixes that problem and creates a new one — the transcript itself is now a raw-PII liability, unsafe to file, share, or drop into a RAG system.
+WhisperVault closes that gap. It's a fully offline, file-in/file-out pipeline that transcribes audio on the Hexagon NPU and immediately pseudonymizes every sensitive span it finds — consistently, reversibly, human-reviewed — before the output ever leaves the device. Nothing touches a network at any stage.
+This isn't a first draft. It's been through four rounds of deliberate adversarial stress-testing — including a post-convergence spot-check by a second, independent reviewer — 30 distinct failure modes found and resolved, documented in full in Section 6. Showing where a system's edges are is part of proving we understand the platform, not a weakness to hide.
+2. The Problem
+Legal, medical, forensic, and defense-adjacent professionals cannot use cloud transcription APIs — policy and regulation (HIPAA, privilege, internal data-handling rules) prohibit sending recordings off-device.
+Local, unredacted transcription is technically possible today but produces a document that is itself a liability — it cannot be filed, shared with a paralegal or assistant, or safely indexed into an internal knowledge base / RAG system.
+Manually redacting a one-hour interview transcript by hand is slow, error-prone, and doesn't scale across a caseload.
+Existing redaction tools are either cloud-based (defeats the purpose) or destructive (permanently deletes information the original professional may legitimately need to recover later).
+3. Solution Overview
+WhisperVault runs a two-stage, purely on-device pipeline on the Hexagon NPU:
+Stage 1 — Speech-to-Text: Whisper-Base-EN (INT8, Qualcomm AI Hub) transcribes the audio file in overlapping 30-second windows.
+Stage 2 — Hybrid Redaction: three parallel detectors (an NER model, a regex/pattern engine, and a user-supplied keyword dictionary) jointly flag sensitive spans, which are then pseudonymized — not deleted — with the mapping stored in a local, encrypted vault.
+The output is a document safe to share, file, or index, and a separate encrypted key the original professional alone can use to re-identify specific entities if genuinely needed — the same reversible model real legal and medical redaction workflows already use.
+4. Technical Architecture
+Figure 1 — WhisperVault dual-pipeline architecture. Blue = Hexagon NPU inference. Amber = lightweight CPU logic (regex, dictionary lookup, pseudonymization — deliberately kept off the NPU since they need no matrix-multiply acceleration).
+4.1 Stage 1 — Speech-to-Text (Hexagon NPU)
+The input audio file is chunked into the fixed 30-second windows Whisper's architecture always pads or trims to — this is what makes the graph statically shaped and NPU-compilation-friendly in the first place, rather than a workaround we imposed.
+Fix #2 (boundary accuracy): 
+chunks overlap by 5 seconds of audio. A name or number that would otherwise fall exactly on a chunk boundary is captured whole in at least one window; the stitcher stage de-duplicates the overlapping text and merges split entities before handing the transcript to Stage 2.
+Precision on the autoregressive claim: 
+Whisper's decoder is autoregressive, like an LLM's — but bounded to a short, fixed maximum length per 30-second chunk. That boundedness, not the absence of autoregression, is why it compiles cleanly into a static QNN graph where open-ended chat-style generation does not.
+Evidence, not assertion: 
+Whisper-Base-EN is a real, published Qualcomm AI Hub model with profiled NPU numbers — decoder inference around 5–7ms per step and peak memory in the 20–30MB range on Hexagon-class hardware. We cite this instead of an invented wattage figure.
+4.2 Stage 2 — Hybrid Redaction Engine (not NER alone)
+Fix #3 (detection scope): 
+a generic NER model recognizes semantic entities — PERSON, ORGANIZATION, LOCATION — it does not natively recognize structured identifiers (SSNs, medical record numbers, phone numbers, dosages) or organization-specific codenames, because those aren't semantic categories, they're patterns and vocabulary. WhisperVault runs three detectors in parallel, not one:
+NER model (INT8) — a DistilBERT checkpoint sourced from the open-source ecosystem and compiled through the AI Hub quantize/profile toolchain (we do not claim AI Hub ships a ready-made NER model — we claim its compilation pipeline gets an open-source one onto the NPU).
+Regex / pattern matcher (CPU) — deterministic rules for SSNs, medical record numbers, phone numbers, card/account numbers, and dosage strings.
+Custom keyword dictionary (CPU) — a user-supplied list of internal project codenames or organization-specific terms no general-purpose model could ever be expected to know. Entries are treated as literal strings, never regex patterns, and are escaped before matching — so a stray wildcard like .* can't flag the whole transcript (Risk R28).
+Flagged spans from all three detectors are merged behind a tunable confidence gate before reaching the review stage, which keeps false-positive noise — a presenter's own slide content getting flagged, for instance — manageable.
+4.3 Pseudonymization & Secure Vault
+Fix #7 (reversible, not destructive): 
+instead of overwriting flagged text with a permanent [REDACTED_PII] marker, WhisperVault applies consistent pseudonymization — every instance of “John Smith” becomes [PERSON_001] throughout the document. This mirrors how real HIPAA Safe-Harbor de-identification and legal e-discovery redaction actually work in practice, and it means the professional hasn't destroyed information they may later need. The mapping itself is stored in a locally encrypted vault protected via Windows DPAPI, tied to the user's own Windows account — not a plaintext sidecar file; only the professional who created the transcript can unlock it to re-identify an entity. The vault's threat boundary is examined further as Risk R11 in Section 6.
+4.4 Human-in-the-Loop Review
+Before any file is finalized, WhisperVault presents a side-by-side diff of the original and pseudonymized transcript with every flagged span individually accept/reject-able. This is a deliberate design choice, not a missing feature — see Section 7.
+5. The Hardware Hook — Why This Belongs on Hexagon
+WhisperVault is architected around the Hexagon NPU's actual, documented strength — compiling cleanly to static INT8/FP16 graphs — rather than fighting its known weak point, which is open-ended dynamic-shape LLM decoding.
+Both models compile to fixed-size graphs: Whisper's 30-second audio window and the NER model's 512-token window are both static by construction, not by workaround.
+This is precisely the shape that has caused real, documented trouble elsewhere on this platform: general-purpose local-LLM tooling (e.g. llama.cpp's QNN backend) has struggled to actually offload core matrix-multiply operations to the NPU for open-ended chat generation. WhisperVault avoids that failure class entirely by construction, not by luck.
+On a CPU-only path, running two sequential transformer models (ASR then NLP classification) for an hour-long deposition would spike fan noise and meaningfully drain battery. On Hexagon, both stages run as NPU-resident inference with the CPU handling only lightweight, non-ML glue work — chunk stitching, regex matching, dictionary lookup, and DPAPI encryption — none of which benefit from or need NPU acceleration.
+Zero packets leave the device at any stage. For HIPAA- and privilege-governed audio, that is not a nice-to-have — it is the entire reason a cloud alternative was never viable in the first place.
+6. Engineering Rigor — Stress-Test & Risk Register
+We ran three rounds of deliberate adversarial review on this design — attacking our own architecture before a judge could. Each round re-tests the previous round's fixes looking for what they broke or missed, then stops when the findings get small enough to be tuning decisions rather than design flaws. That convergence — fewer and smaller issues each round — is the actual signal we were watching for, not just the count. Full trail below; summary in Section 6.5.
+6.1 Round 1a — Core Architecture Fixes
+These were found during the first full adversarial pass over the original concept and are load-bearing — they changed the architecture, not just the wording.
+#
+Issue found
+Fix applied
+1
+Zero-vaporware check
+Both models (Whisper-Base-EN, DistilBERT-class NER) are real, either directly AI Hub-listed or compiled through AI Hub's own toolchain — not hypothetical.
+2
+Chunk-boundary accuracy loss
+5-second audio overlap stride + transcript stitcher; 512-token overlap on the NER pass, with span de-duplication at merge time.
+3
+NER detection scope overclaim
+Hybrid engine: NER (semantic entities) + regex (structured IDs) + custom keyword dictionary (org-specific terms), run in parallel.
+4
+Unverified AI Hub model claim
+Explicitly sourced as an open-source NER checkpoint compiled via AI Hub's export/quantize pipeline, not presented as a native AI Hub catalog model.
+5
+Unsourced “~2 watts” figure
+Replaced with cited, real AI Hub profiling data (~5–7ms/decode step, 20–30MB peak memory) instead of an invented wattage number.
+6
+“Classified” / ITAR wording
+Reframed as “sensitive internal/proprietary” and “regulated data workflows (HIPAA/legal privilege)” — accurate to what a hackathon prototype can credibly claim.
+7
+Destructive, one-way redaction
+Replaced with consistent, reversible pseudonymization + a locally encrypted (DPAPI) mapping vault.
+8
+Implied autonomous compliance guarantee
+Repositioned as decision support with mandatory human review — a diff view with accept/reject per flagged span, never an unattended compliance claim.
+6.2 Round 1b — Additional Edge Cases
+Same pass, widened specifically to hunt mishaps and demo-day scenarios rather than architectural flaws — the kind of thing that surfaces mid-demo or mid-cross-examination, not at a whiteboard.
+#
+Category
+Failure scenario
+Mitigation / response
+R9
+Accuracy / UX
+A presenter's own benign slide numbers or dates get flagged and pseudonymized unnecessarily, eroding trust in the tool.
+Confidence-gated merge (Sec. 4.2) before anything reaches review; threshold is tunable, not fixed.
+R10
+Liability
+A reviewer rubber-stamps flagged spans without reading closely, and a genuine miss reaches the final file — the tool becomes a false sense of security.
+No “accept all” shortcut by design; every flagged span requires an individual, explicit accept/reject decision in the diff view.
+R11
+Security
+The local encrypted vault is only as strong as the Windows account it's tied to — an already-unlocked, compromised session exposes it.
+Accepted, standard boundary identical to Windows Credential Manager's own threat model — stated here explicitly rather than glossed over as a solved problem.
+R12
+Deployment
+Entry-level Snapdragon X Plus configurations carry less RAM than X Elite; loading both models resident at once could pressure memory.
+Pipeline is sequential by design — Whisper and the NER model are never resident simultaneously, capping peak footprint to one model at a time (~20–30MB per AI Hub profiling data).
+R13
+Consent / scope
+“Why not redact in real time, live, during the meeting itself?” — the obvious next question from a judge.
+Deliberately out of scope: live processing means analyzing other participants' speech as it happens, a materially different consent posture than a file the user already recorded and owns. File-based batch input was chosen specifically to avoid this gray zone.
+R14
+Positioning
+“Local Whisper transcription” alone is a commoditized demo already seen in this exact competition.
+Every section of this document leads with the redaction / pseudonymization / vault workflow, not the transcription step — transcription is the input, not the pitch.
+R15
+Technical
+Whisper is a known source of hallucinated or looping output near hard, context-free audio boundaries.
+The same 5-second overlap stride used for entity accuracy (Fix #2) also keeps every transcribed span inside full audio context rather than sitting at a hard cut edge.
+6.3 Round 2 — Stress-Testing the Hardened Design
+With Round 1's fixes in place, we attacked the design again — this time assuming every Round 1 fix works, and asking what breaks next. This is where the deeper, more interesting gaps showed up.
+#
+Category
+Failure scenario
+Mitigation / response
+R16
+ASR / Technical
+Spoken numbers (an SSN or phone number read aloud) transcribe as words or unpunctuated digit runs — “one two three…” — that a written-form regex never matches.
+Number-normalization pass between ASR output and the regex layer (spelled-to-digit, digit-run detection), scoped by plausible length — 9 digits checked as SSN-shaped, 10 as phone-shaped, etc.
+R17
+Technical / Stitching
+Naive text-concatenation across overlapping chunks (Fix #2) can duplicate or garble boundary words instead of merging them cleanly.
+Merge using Whisper's own word-level timestamps to align overlap regions, not raw string concatenation.
+R18
+Accuracy / Resolution
+Two different people who share a common name (“John Smith”) collapse into the same pseudonym, merging their identities incorrectly — worse than no redaction.
+Lightweight context-clustering flags same-string-different-person cases for mandatory individual review instead of auto-merging.
+R19
+Privacy depth
+Quasi-identifiers survive redaction — “the defendant's 8-year-old daughter” can re-identify someone with no name present at all. No NER or regex system catches this.
+Documented as a known, industry-wide limitation shared by every automated de-identification tool — positioned honestly as reducing exposure, not guaranteeing anonymity.
+R20
+Metadata
+Exported files can carry hidden metadata — author name, original filename, timestamps — that re-identifies the case even after the text itself is clean.
+File metadata is stripped automatically on export.
+R21
+Continuity
+The DPAPI vault is tied to one Windows profile/machine; a lost laptop or profile reset makes it permanently unrecoverable.
+Optional passphrase-protected vault backup, named as a v1.1 feature rather than a silent v1 gap.
+R22
+Regulatory scope
+HIPAA, legal privilege, and defense-adjacent data imply different entity sets — one generic profile can't honestly claim to fit all three at once.
+Roadmap item: toggleable domain-specific redaction profiles, instead of overclaiming one-size-fits-all compliance today.
+R23
+UX at scale
+A multi-hour deposition can produce hundreds of flagged spans; span-by-span review erodes the entire “saves time” pitch.
+Group duplicate/identical entities into one bulk accept/reject decision instead of one click per occurrence.
+6.4 Round 3 — Testing Round 2's Own Fixes
+One more pass, specifically targeting the fixes we'd just added in Round 2 — the findings here are noticeably smaller and more residual than Rounds 1 or 2, which is the convergence signal we were looking for.
+#
+Category
+Failure scenario
+Mitigation / response
+R24
+Residual risk
+The number-normalization fix (R16) can itself over-match — a spoken phone extension or ordinary count could be swept into a pattern meant for SSNs.
+Normalization is length- and format-specific (exact digit counts checked against known ID formats), not a blanket digit sweep.
+R25
+Residual risk
+Timestamp-based stitching (R17's fix) inherits Whisper's own timestamp drift on noisy or overlapping-speaker audio.
+Accepted as a documented residual limitation — perfect alignment on cross-talk audio is a harder ASR research problem than this project scopes to solve.
+R26
+Scope discipline
+Building all three domain profiles (R22) before the deadline risks scope inflation right before the demo.
+One well-executed generic profile ships for the demo; domain profiles stay a named roadmap item, not a v1 promise.
+R27
+Process safety
+Bulk accept/reject (R23's fix) could silently approve a same-name/different-person collision (R18) if a reviewer trusts “apply to all” without noticing.
+Bulk-accept is automatically disabled for any entity the R18 collision heuristic flags as ambiguous — those stay individually reviewed; everything else can batch.
+6.5 Convergence Summary
+Round
+New flaws found
+What the findings looked like
+1 (1a + 1b)
+15
+Architecture-level — model claims, detection scope, redaction reversibility, compliance framing. Changed the design.
+2
+8
+Second-order product/technical gaps — numeric transcription edge cases, entity resolution, metadata, continuity. Changed components, not the architecture.
+3
+4
+Residual and process-level — tuning parameters and scope-discipline calls on Round 2's own fixes. No architecture or component changes.
+Flaw count per round: 15 → 8 → 4, and severity dropped alongside volume — Round 3 found nothing that needed a new component, only tighter parameters on ones we'd already built. That's the point at which we declared convergence.
+6.6 Round 4 — Post-Convergence Spot-Check
+Declaring convergence is easy to do out of fatigue. To test that it was real, a second, independent reviewer attacked the finished design cold, with five fresh attack scenarios. Two produced genuine new entries, one was already covered but is now documented explicitly, and two were rejected as duplicates of existing entries.
+#
+Category
+Failure scenario
+Mitigation / response
+R28
+Security / UX
+A careless or malicious entry in the Custom Keyword Dictionary (a wildcard such as .* or \w+) matches every word in the transcript and makes the tool useless.
+Dictionary entries are treated as literal strings, never compiled as regex; input is escaped and validated before it reaches the matcher (Sec. 4.2).
+R29
+Security / UX
+The pseudonymized output is clean, but the original audio file stays on disk with raw PII spoken aloud — a secondary exposure vector if the device is lost or compromised.
+Optional post-export prompt: “Securely delete the original audio file? (Cannot be undone.)” User keeps control of their own source files; the warning appears every export.
+R30
+ASR accuracy
+Homophone errors upstream: a term like “APC” is transcribed as “ape,” so neither regex nor NER ever sees the sensitive term.
+No separate technical fix — this is an ASR accuracy limit, covered by the mandatory human review in Sec. 7. Documented explicitly instead of left implicit.
+Considered and rejected as duplicates, not counted: cross-language leakage (a Spanish term in English speech) sits entirely inside the English-only scope boundary in Section 7, and the “replay attack” on the vault is the same threat boundary as R11 — DPAPI is only as strong as the Windows account. Counting either as new would inflate the register without adding information.
+Verdict: five fresh attacks, zero architecture-level findings, two small additions. The independent pass mostly reproduced what we already knew, which is the evidence that convergence in Section 6.5 was real and not just fatigue.
+We're still treating this register as living documentation — any new failure mode found during build or rehearsal gets added here before it gets asked about on stage.
+7. Scope & Honesty — What We Are Not Claiming
+We'd rather state our boundaries up front than have a judge find them for us:
+WhisperVault is not a certified HIPAA-compliance product. It is a redaction-assistance tool that materially reduces manual review workload — a licensed compliance officer or attorney remains the final authority on any given document.
+The hybrid detector will have a non-zero false-negative rate, as any NER/pattern system does. This is exactly why human review is mandatory rather than optional in the workflow, not an afterthought bolted onto an otherwise autonomous pipeline.
+English-only at MVP stage (Whisper-Base-EN). Multilingual support is a scoped future-work item, not a v1 claim.
+Processes user-recorded, already-consented audio files the professional explicitly imports — this is not a live ambient-listening or wiretapping tool, and does not touch a live microphone stream.
+8. Deployment & Accessibility
+No OS-level driver installation, no admin elevation, no virtual camera/audio device registration — the entire pipeline is file-in, file-out, which is the simplest possible install story on Windows on Snapdragon.
+Single MSIX-packaged desktop app; drag-and-drop an audio file, review flagged spans, export.
+Runs natively on ARM64 Windows on the OmniBook X; AI Hub's Python tooling is used only at model-compile time on the development machine, never bundled into the shipped ARM64 runtime app — avoiding the x64/ARM64 Python packaging mismatch that trips up naive AI Hub integrations.
+Fully offline after install — no ongoing account, API key, or connectivity requirement, which matters directly for the regulated environments this tool targets.
+9. Alignment with Official Judging Criteria
+Criterion
+How WhisperVault addresses it
+Technical Implementation
+Two real, cited AI Hub / AI-Hub-compiled models; static-graph architecture chosen specifically to avoid documented QNN dynamic-shape limitations; hybrid detection engine with a defensible, non-overclaimed scope.
+Application Use Case & Innovation
+Reversible pseudonymization + encrypted vault + bring-your-own keyword dictionary go beyond a basic transcribe-and-blank demo, addressing a real enterprise/legal/medical redaction workflow.
+Deployment & Accessibility
+File-in/file-out desktop app; no driver hacks, no admin rights, ARM64-native; offline after install.
+Presentation & Documentation
+This document explicitly states scope boundaries and cites real profiling data — demonstrating platform understanding rather than only platform enthusiasm.
+10. Roadmap / Future Work
+Domain-specific NER fine-tuning (clinical de-identification for medical dosage/diagnosis entities, legal-specific entity types).
+Multilingual transcription via additional Whisper checkpoints.
+Direct integration with local RAG pipelines as a pre-ingestion redaction filter.
+Formal third-party compliance review as a path toward regulated-industry certification, beyond this hackathon's scope.
+Appendix A — Model & Platform Citations
+Whisper-Base-EN — Qualcomm AI Hub model catalog (qai_hub_models.models.whisper_base_en); NPU profiling data (decoder inference, peak memory) sourced from published AI Hub job results on Hexagon-class hardware.
+Qualcomm AI Hub — 175+ pre-optimized models, remote profiling across 50+ real Snapdragon devices; qai_hub_models Python package for model compilation, quantization, and export.
+QAIRT / QNN SDK — current unified Qualcomm AI Engine Direct toolchain; static graph compilation is the documented, supported path for Hexagon NPU deployment.
+NER model — open-source DistilBERT-class checkpoint, compiled and quantized through the AI Hub export toolchain per the challenge rules' allowance for “open-source platforms” models.
